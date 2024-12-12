@@ -1,7 +1,7 @@
 # AWS Plugin for Eliza
 
 This plugin provides AWS infrastructure and deployment capabilities for running Eliza in a scalable cloud environment.
-It was created inadvertently during the creation of TrenchBuddy due to its unique requirements as a one-agent-per-user application.
+It was created inadvertently during the creation of [TrenchBuddy.io](https://TrenchBuddy.io) due to its unique requirements as a one-agent-per-user application.
 AWS provided a great framework for scaling, centralized data storage, and authentication. I hope this can be of use to others
 who want to host Eliza on AWS, regardless of whether they leverage the multi-agent modifications I made.
 
