@@ -1,0 +1,378 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Eliza Infrastructure Template'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [dev, staging, production]
+    Description: Deployment environment
+
+  DBUsername:
+    Type: String
+    Description: Database admin username
+    MinLength: 1
+    MaxLength: 16
+    Default: dbadmin
+
+  DBPassword:
+    Type: String
+    Description: Database admin password
+    NoEcho: true
+    MinLength: 8
+
+  SignupHandlerCode:
+    Type: String
+    Description: Lambda function code for signup handler
+    NoEcho: true
+
+  CustomAuthorizerCode:
+    Type: String
+    Description: Lambda function code for custom authorizer
+    NoEcho: true
+
+Resources:
+  # VPC Configuration
+  MainVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 172.31.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+
+  # Subnets across 3 AZs (matching your setup)
+  Subnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 172.31.0.0/20
+      AvailabilityZoneId: use2-az1
+      MapPublicIpOnLaunch: true
+
+  Subnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 172.31.16.0/20
+      AvailabilityZoneId: use2-az2
+      MapPublicIpOnLaunch: true
+
+  Subnet3:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref MainVPC
+      CidrBlock: 172.31.32.0/20
+      AvailabilityZoneId: use2-az3
+      MapPublicIpOnLaunch: true
+
+  # Security Group (matching your exact configuration)
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: !Sub ${Environment} Web Server Security Group
+      GroupName: !Sub ${Environment}-web-server-sg
+      VpcId: !Ref MainVPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !GetAtt MainVPC.DefaultSecurityGroup
+          SourceSecurityGroupOwnerId: !Ref AWS::AccountId
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          IpProtocol: -1
+          FromPort: -1
+          ToPort: -1
+
+  # Network Load Balancer (matching your configuration)
+  ElizaNLB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${Environment}-nlb
+      Type: network
+      Scheme: internet-facing
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: false
+        - Key: deletion_protection.enabled
+          Value: false
+
+  # Target Group
+  ElizaTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${Environment}-target-group
+      Port: 3000
+      Protocol: TCP
+      VpcId: !Ref MainVPC
+      HealthCheckEnabled: true
+      HealthCheckPort: traffic-port
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 300
+
+  # DynamoDB Tables
+  SignupsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Environment}-signups
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: false
+      TableClass: STANDARD
+      WarmThroughput:
+        ReadUnitsPerSecond: 12000
+        WriteUnitsPerSecond: 4000
+
+  PreferencesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub ${Environment}-preferences
+      AttributeDefinitions:
+        - AttributeName: username
+          AttributeType: S
+      KeySchema:
+        - AttributeName: username
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      DeletionProtectionEnabled: false
+      TableClass: STANDARD
+      WarmThroughput:
+        ReadUnitsPerSecond: 12000
+        WriteUnitsPerSecond: 4000
+
+  # RDS Configuration
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Created from the RDS Management Console
+      SubnetIds:
+        - !Ref Subnet1
+        - !Ref Subnet2
+        - !Ref Subnet3
+
+  PostgresDatabase:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: !Sub ${Environment}-db
+      Engine: postgres
+      EngineVersion: 16.3
+      DBInstanceClass: db.t4g.micro
+      AllocatedStorage: 20
+      StorageType: gp2
+      MaxAllocatedStorage: 1000
+      PubliclyAccessible: true
+      VPCSecurityGroups:
+        - !Ref WebServerSecurityGroup
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      BackupRetentionPeriod: 1
+      PreferredBackupWindow: 09:36-10:06
+      PreferredMaintenanceWindow: sat:07:55-sat:08:25
+      AutoMinorVersionUpgrade: true
+      EnablePerformanceInsights: true
+      PerformanceInsightsRetentionPeriod: 7
+      DeletionProtection: false
+      MasterUsername: !Ref DBUsername
+      Port: 5432
+
+  # API Gateway
+  ElizaSignupAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${Environment}-signup-api
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      ApiKeySourceType: HEADER
+
+  ElizaAppAPI:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Name: !Sub ${Environment}-app-api
+      EndpointConfiguration:
+        Types:
+          - REGIONAL
+      ApiKeySourceType: HEADER
+
+  # IAM Roles for Lambda Functions
+  SignupHandlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      RoleName: !Sub ${Environment}-signup-handler-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref LambdaBasicExecutionPolicy
+      MaxSessionDuration: 3600
+
+  CustomAuthorizerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /service-role/
+      RoleName: !Sub ${Environment}-custom-authorizer-role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref LambdaBasicExecutionPolicy
+      MaxSessionDuration: 3600
+
+  # IAM Policy for Lambda Functions
+  LambdaBasicExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${Environment}-lambda-execution-policy
+      Path: /service-role/
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - apigateway:*
+              - dynamodb:GetItem
+              - dynamodb:GetRecords
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+              - !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${SignupsTable}
+          - Effect: Allow
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/customAuthorizer:*
+
+  # Lambda Functions
+  SignupHandler:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-signup-handler
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt SignupHandlerRole.Arn
+      Code:
+        ZipFile: !Ref SignupHandlerCode  # You'll need to provide the code
+      MemorySize: 128
+      Timeout: 3
+      PackageType: Zip
+      Architectures:
+        - x86_64
+      LoggingConfig:
+        LogFormat: Text
+        LogGroup: /aws/lambda/signupHandler
+
+  CustomAuthorizer:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${Environment}-custom-authorizer
+      Runtime: nodejs22.x
+      Handler: index.handler
+      Role: !GetAtt CustomAuthorizerRole.Arn
+      Code:
+        ZipFile: !Ref CustomAuthorizerCode  # You'll need to provide the code
+      MemorySize: 128
+      Timeout: 3
+      PackageType: Zip
+      Architectures:
+        - x86_64
+      LoggingConfig:
+        LogFormat: Text
+        LogGroup: /aws/lambda/customAuthorizer
+
+  # Lambda Permissions
+  SignupHandlerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt SignupHandler.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ElizaSignupAPI}/*/POST/signup
+
+  CustomAuthorizerPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt CustomAuthorizer.Arn
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ElizaAppAPI}/authorizers/${CustomAPIAuthorizer}
+
+  # Log Groups
+  SignupHandlerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/signupHandler
+      RetentionInDays: 30
+
+  CustomAuthorizerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: /aws/lambda/customAuthorizer
+      RetentionInDays: 30
+
+  # API Gateway Authorizer
+  CustomAPIAuthorizer:
+    Type: AWS::ApiGateway::Authorizer
+    Properties:
+      Name: !Sub ${Environment}-custom-authorizer
+      RestApiId: !Ref ElizaAppAPI
+      Type: TOKEN
+      AuthorizerUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${CustomAuthorizer.Arn}/invocations
+      IdentitySource: method.request.header.Authorization
+      AuthorizerResultTtlInSeconds: 300
+
+Outputs:
+  SignupApiEndpoint:
+    Description: Signup API Gateway endpoint
+    Value: !Sub https://${ElizaSignupAPI}.execute-api.${AWS::Region}.amazonaws.com/live
+
+  AppApiEndpoint:
+    Description: App API Gateway endpoint
+    Value: !Sub https://${ElizaAppAPI}.execute-api.${AWS::Region}.amazonaws.com/live
+
+  DatabaseEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt PostgresDatabase.Endpoint.Address
+
+  LoadBalancerDNS:
+    Description: Network Load Balancer DNS name
+    Value: !GetAtt ElizaNLB.DNSName
